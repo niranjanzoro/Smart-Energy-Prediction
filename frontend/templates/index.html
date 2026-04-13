@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>EnergyIQ – Smart Consumption Predictor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/static/css/style.css"/>
+</head>
+<body>
+
+<!-- ── Top Nav ─────────────────────────────────────────────────────── -->
+<header class="nav">
+  <div class="nav-brand">
+    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+      <polygon points="14,2 26,9 26,19 14,26 2,19 2,9" stroke="var(--accent)" stroke-width="2" fill="none"/>
+      <path d="M14 8 L11 15 L14 15 L10 22 L17 13 L14 13 Z" fill="var(--accent)"/>
+    </svg>
+    <span class="brand-text">Energy<span class="accent-text">IQ</span></span>
+  </div>
+  <nav class="nav-links">
+    <a href="#dashboard" class="nav-link active" data-section="dashboard">Dashboard</a>
+    <a href="#predict" class="nav-link" data-section="predict">Predict</a>
+    <a href="#anomalies" class="nav-link" data-section="anomalies">Anomalies</a>
+    <a href="#models" class="nav-link" data-section="models">Model Metrics</a>
+  </nav>
+  <div class="nav-status">
+    <span class="status-dot" id="apiStatus"></span>
+    <span class="status-label" id="apiLabel">Connecting…</span>
+  </div>
+</header>
+
+<!-- ── Hero ────────────────────────────────────────────────────────── -->
+<section class="hero" id="dashboard">
+  <div class="hero-grid">
+    <div class="hero-copy">
+      <p class="hero-eyebrow">AI-Powered Forecasting</p>
+      <h1 class="hero-title">Predict.<br/>Optimise.<br/>Save.</h1>
+      <p class="hero-sub">LSTM &amp; Linear Regression models analyse your household power data to forecast consumption and surface actionable savings.</p>
+      <div class="hero-cta">
+        <button class="btn btn-primary" onclick="scrollTo('predict')">Run Prediction</button>
+        <button class="btn btn-ghost" onclick="loadHistory()">Load History</button>
+      </div>
+    </div>
+    <!-- KPI tiles -->
+    <div class="kpi-grid">
+      <div class="kpi-tile" id="kpi-mean">
+        <span class="kpi-val">—</span>
+        <span class="kpi-label">Avg kW (7 days)</span>
+      </div>
+      <div class="kpi-tile" id="kpi-peak">
+        <span class="kpi-val">—</span>
+        <span class="kpi-label">Peak kW</span>
+      </div>
+      <div class="kpi-tile kpi-accent" id="kpi-saving">
+        <span class="kpi-val">—</span>
+        <span class="kpi-label">Potential Saving</span>
+      </div>
+      <div class="kpi-tile" id="kpi-anomaly">
+        <span class="kpi-val">—</span>
+        <span class="kpi-label">Anomalies Detected</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Historical Chart ─────────────────────────────────────────────── -->
+<section class="section">
+  <div class="section-header">
+    <h2 class="section-title">Historical Consumption</h2>
+    <div class="timeframe-tabs">
+      <button class="tab active" data-days="7">7D</button>
+      <button class="tab" data-days="14">14D</button>
+      <button class="tab" data-days="30">30D</button>
+    </div>
+  </div>
+  <div class="chart-card">
+    <canvas id="historyChart" height="90"></canvas>
+    <div class="chart-loading" id="historyLoader">Loading data…</div>
+  </div>
+</section>
+
+<!-- ── Prediction Panel ──────────────────────────────────────────────── -->
+<section class="section" id="predict">
+  <div class="section-header">
+    <h2 class="section-title">Prediction Engine</h2>
+  </div>
+  <div class="two-col">
+    <!-- Controls -->
+    <div class="panel panel-controls">
+      <h3 class="panel-title">Parameters</h3>
+
+      <div class="form-group">
+        <label class="form-label">Forecast Horizon (hours)</label>
+        <div class="slider-row">
+          <input type="range" id="nSteps" min="1" max="72" value="24" class="slider"/>
+          <span class="slider-val" id="nStepsVal">24h</span>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Model</label>
+        <div class="seg-control">
+          <button class="seg active" data-model="linear">Linear</button>
+          <button class="seg" data-model="lstm">LSTM</button>
+          <button class="seg" data-model="both">Compare</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Past 24h Usage (kW, comma-separated)</label>
+        <textarea id="pastUsage" class="form-textarea" placeholder="e.g. 1.2, 0.9, 1.5, 2.1 …" rows="3"></textarea>
+      </div>
+
+      <button class="btn btn-primary btn-full" id="runPredictBtn" onclick="runPrediction()">
+        <span id="predictBtnText">Run Forecast</span>
+        <span id="predictSpinner" class="spinner hidden"></span>
+      </button>
+    </div>
+
+    <!-- Output -->
+    <div class="panel">
+      <h3 class="panel-title">Forecast Output</h3>
+      <div class="chart-card compact">
+        <canvas id="predictChart" height="120"></canvas>
+        <div class="chart-loading" id="predictLoader">Awaiting input…</div>
+      </div>
+      <div class="stat-row" id="forecastStats" style="display:none">
+        <div class="stat"><span class="stat-val" id="fMean">—</span><span class="stat-lbl">Avg kW</span></div>
+        <div class="stat"><span class="stat-val" id="fPeak">—</span><span class="stat-lbl">Peak kW</span></div>
+        <div class="stat"><span class="stat-val" id="fMin">—</span><span class="stat-lbl">Min kW</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Real-time Simulation ──────────────────────────────────────────── -->
+<section class="section">
+  <div class="section-header">
+    <h2 class="section-title">Real-Time Simulation</h2>
+    <div class="sim-controls">
+      <button class="btn btn-sm btn-primary" id="simStartBtn" onclick="toggleSimulation()">▶ Start</button>
+      <span class="sim-status" id="simStatus">Stopped</span>
+    </div>
+  </div>
+  <div class="chart-card">
+    <canvas id="simChart" height="80"></canvas>
+  </div>
+</section>
+
+<!-- ── Optimisation Suggestions ─────────────────────────────────────── -->
+<section class="section" id="anomalies">
+  <div class="section-header">
+    <h2 class="section-title">Optimisation Suggestions</h2>
+    <button class="btn btn-sm btn-ghost" onclick="loadSuggestions()">Refresh</button>
+  </div>
+  <div class="suggestions-grid" id="suggestionsGrid">
+    <div class="suggestion-skeleton"></div>
+    <div class="suggestion-skeleton"></div>
+    <div class="suggestion-skeleton"></div>
+  </div>
+</section>
+
+<!-- ── Anomaly Detection ──────────────────────────────────────────────── -->
+<section class="section">
+  <div class="section-header">
+    <h2 class="section-title">Anomaly Detection</h2>
+    <div class="seg-control">
+      <button class="seg active" data-anom-method="rolling_zscore">Rolling Z</button>
+      <button class="seg" data-anom-method="iqr">IQR</button>
+      <button class="seg" data-anom-method="zscore">Z-Score</button>
+    </div>
+  </div>
+  <div class="two-col">
+    <div class="chart-card">
+      <canvas id="anomChart" height="110"></canvas>
+    </div>
+    <div class="panel anom-stats-panel">
+      <div class="anom-stat-big">
+        <span class="anom-count" id="anomCount">—</span>
+        <span class="anom-label">Anomalies Found</span>
+      </div>
+      <div class="anom-pct-row">
+        <div class="anom-pct-bar-wrap">
+          <div class="anom-pct-bar" id="anomPctBar" style="width:0%"></div>
+        </div>
+        <span id="anomPctLabel">0%</span>
+      </div>
+      <div class="severity-badge-wrap">
+        <span class="severity-badge" id="severityBadge">—</span>
+      </div>
+      <button class="btn btn-primary btn-full mt16" onclick="runAnomalyDetection()">Analyse Series</button>
+    </div>
+  </div>
+</section>
+
+<!-- ── Model Metrics ─────────────────────────────────────────────────── -->
+<section class="section" id="models">
+  <div class="section-header">
+    <h2 class="section-title">Model Performance</h2>
+  </div>
+  <div class="metrics-grid" id="metricsGrid">
+    <!-- populated by JS -->
+  </div>
+  <div class="chart-card mt24">
+    <canvas id="metricsChart" height="80"></canvas>
+  </div>
+</section>
+
+<!-- ── Footer ────────────────────────────────────────────────────────── -->
+<footer class="footer">
+  <p>EnergyIQ — Smart Energy Consumption Predictor &nbsp;|&nbsp; LSTM + Linear Regression &nbsp;|&nbsp; UCI Dataset</p>
+  <p class="footer-sub">Academic project · Flask · TensorFlow · Chart.js</p>
+</footer>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

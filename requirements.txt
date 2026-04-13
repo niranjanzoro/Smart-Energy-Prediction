@@ -1,0 +1,25 @@
+
+flask==3.0.3
+flask-cors==4.0.1
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.4.2
+
+# Deep Learning (LSTM)
+tensorflow==2.16.1
+
+# Visualization
+matplotlib==3.8.4
+seaborn==0.13.2
+
+# Utilities
+joblib==1.4.2
+python-dotenv==1.0.1
+requests==2.32.3
+
+# Anomaly Detection
+scipy==1.13.0
+
+# Optional: Jupyter for notebooks
+jupyter==1.0.0
+ipykernel==6.29.4

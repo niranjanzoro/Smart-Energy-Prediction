@@ -1,0 +1,31 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+venv/
+env/
+.venv/
+
+# Model artifacts (large files)
+models/saved/*.keras
+models/saved/*.pkl
+models/saved/*.h5
+
+# Data
+data/household_power_consumption.txt
+data/hpc.zip
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
