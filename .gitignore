@@ -1,28 +1,53 @@
+.env
+.env.*
+*.log
+*.tmp
+*.bak
+*.orig
+
+# Python runtime
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
 .Python
-.env
 venv/
 env/
 .venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# NOTE: models/saved/* is committed on purpose (small, needed by the API / deployment)
+# Local package caches
+pip-wheel-metadata/
+.eggs/
+*.egg-info/
 
-# Data
-data/household_power_consumption.txt
-data/hpc.zip
-
-# Jupyter
+# Jupyter / notebooks
 .ipynb_checkpoints/
 notebooks/.ipynb_checkpoints/
 
-# OS
+# Local model/training artifacts
+models/saved/*.pkl
+models/saved/*.keras
+models/saved/*.json
+# NOTE: keep only repo-selected tracked files here if needed; otherwise these are local artifacts.
+
+# Data downloads / generated analysis files
+data/*.csv
+!data/processed_energy.csv
+!data/charts/
+
+# OS / editor
 .DS_Store
 Thumbs.db
-
-# IDE
 .vscode/
 .idea/
 *.swp
+*.swo
+
+# Local Windows launcher
+run_app.bat
+
+# Optional local project files
+*.local
