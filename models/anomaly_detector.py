@@ -60,14 +60,18 @@ def rolling_zscore_anomalies(
     """
     Adaptive anomaly detection using a rolling z-score.
 
-    Each point is scored relative to the rolling mean and standard
-    deviation of the preceding `window` observations.
+    Each point is scored against the mean / std of the PRECEDING ``window``
+    observations (the point itself is excluded, otherwise a spike inflates
+    its own baseline and hides itself).  The first few points, which have too
+    little history, are never flagged.
     """
-    s = pd.Series(series)
-    roll_mean = s.rolling(window, min_periods=1).mean()
-    roll_std = s.rolling(window, min_periods=1).std().fillna(1e-9)
-    z = np.abs((s - roll_mean) / roll_std)
-    return (z > threshold).values
+    s = pd.Series(series, dtype=float)
+    prev = s.shift(1)
+    roll_mean = prev.rolling(window, min_periods=max(3, window // 4)).mean()
+    roll_std = prev.rolling(window, min_periods=max(3, window // 4)).std()
+    roll_std = roll_std.clip(lower=1e-3)          # avoid division by ~0 on flat stretches
+    z = ((s - roll_mean) / roll_std).abs()
+    return (z > threshold).fillna(False).to_numpy()
 
 
 # ── Isolation Forest ──────────────────────────────────────────────────────────
@@ -127,6 +131,26 @@ def detect_anomalies(
         'severity'     : str ('low' / 'medium' / 'high'),
     }
     """
+    series = np.asarray(series, dtype=float)
+
+    # Each detector has its own parameters; map the generic ``threshold``
+    # onto the right one and drop anything a detector does not understand
+    # (previously a mismatched keyword raised TypeError and was swallowed).
+    threshold = kwargs.pop("threshold", None)
+    if method in ("zscore", "rolling_zscore") and threshold is not None:
+        kwargs["threshold"] = threshold
+    elif method == "iqr" and threshold is not None:
+        kwargs.setdefault("factor", threshold)
+    allowed = {
+        "zscore": {"threshold"},
+        "iqr": {"factor"},
+        "rolling_zscore": {"window", "threshold"},
+        "isolation_forest": {"contamination", "random_state"},
+    }
+    if method not in allowed:
+        raise ValueError(f"Unknown method '{method}'.  Choose from {list(allowed)}")
+    kwargs = {k: v for k, v in kwargs.items() if k in allowed[method]}
+
     dispatch = {
         "zscore": zscore_anomalies,
         "iqr": iqr_anomalies,
@@ -135,9 +159,6 @@ def detect_anomalies(
             s.reshape(-1, 1), **kw
         ),
     }
-
-    if method not in dispatch:
-        raise ValueError(f"Unknown method '{method}'.  Choose from {list(dispatch)}")
 
     mask = dispatch[method](series, **kwargs)
     indices = np.where(mask)[0].tolist()
@@ -177,118 +198,110 @@ def generate_suggestions(
     anomaly_result: dict = None,
 ) -> list[dict]:
     """
-    Analyse consumption patterns and return actionable optimisation tips.
+    Rule-based analysis of a consumption pattern → actionable tips.
+
+    NOTE: these are transparent heuristics, not a learned model.  Each tip has
+    a ``basis`` field: 'computed' (derived from the series) or 'heuristic'
+    (a typical figure from the energy-efficiency literature, not measured).
 
     Parameters
     ----------
-    series        : 1-D hourly energy consumption array (kW)
-    timestamps    : DatetimeIndex aligned with `series`
+    series        : 1-D hourly consumption array (kW)
+    timestamps    : DatetimeIndex aligned with ``series`` (enables time-of-day tips)
     anomaly_result: output of detect_anomalies()
 
-    Returns
-    -------
-    List of suggestion dicts:
-        {
-          'category': str,
-          'title'   : str,
-          'detail'  : str,
-          'impact'  : str ('low' / 'medium' / 'high'),
-          'saving_pct': float,
-        }
+    Returns list of {category, title, detail, impact, saving_pct, basis}.
     """
+    series = np.asarray(series, dtype=float)
     suggestions = []
     mean_usage = float(np.mean(series))
-    peak_usage = float(np.max(series))
 
-    # 1. Peak-hour detection (assume hours 17-21 are costly)
     if timestamps is not None:
-        peak_mask = (timestamps.hour >= 17) & (timestamps.hour <= 21)
-        peak_mean = float(np.mean(series[peak_mask])) if peak_mask.any() else 0
-        offpeak_mean = float(np.mean(series[~peak_mask])) if (~peak_mask).any() else 0
+        hours = np.asarray(pd.DatetimeIndex(timestamps).hour)
 
-        if peak_mean > 1.3 * offpeak_mean:
-            saving = round(100 * (peak_mean - offpeak_mean) / peak_mean, 1)
-            suggestions.append(
-                {
+        # 1. Evening peak (17:00-21:59 assumed to be the expensive tariff window)
+        peak_mask = (hours >= 17) & (hours <= 21)
+        if peak_mask.any() and (~peak_mask).any():
+            peak_mean = float(series[peak_mask].mean())
+            offpeak_mean = float(series[~peak_mask].mean())
+            if offpeak_mean > 0 and peak_mean > 1.3 * offpeak_mean:
+                higher_pct = round(100 * (peak_mean - offpeak_mean) / offpeak_mean, 1)
+                # share of total energy that sits above the off-peak level in peak hours
+                excess = float(np.clip(series[peak_mask] - offpeak_mean, 0, None).sum())
+                shiftable_pct = round(100 * excess / series.sum(), 1)
+                suggestions.append({
                     "category": "Peak Hours",
-                    "title": "Shift Usage Away From Peak Hours (5 PM – 9 PM)",
+                    "title": "Shift Usage Away From Peak Hours (5 PM – 10 PM)",
                     "detail": (
-                        f"Your average peak-hour consumption is {peak_mean:.2f} kW, "
-                        f"which is {saving}% higher than off-peak.  "
-                        "Consider running dishwashers, washing machines, and EV chargers "
-                        "after 10 PM to cut costs significantly."
+                        f"Average peak-hour load is {peak_mean:.2f} kW, {higher_pct}% above "
+                        f"your off-peak average ({offpeak_mean:.2f} kW). About {shiftable_pct}% "
+                        "of your total energy is this peak excess. Running dishwashers, "
+                        "washing machines and EV chargers later can reduce cost on time-of-use tariffs."
                     ),
                     "impact": "high",
-                    "saving_pct": saving,
-                }
-            )
+                    "saving_pct": shiftable_pct,
+                    "basis": "computed",
+                })
 
-    # 2. High overall consumption
-    if mean_usage > 1.5:  # kW threshold
-        suggestions.append(
-            {
-                "category": "Baseline Load",
-                "title": "Reduce Standby / Always-On Appliances",
-                "detail": (
-                    f"Your average consumption is {mean_usage:.2f} kW.  "
-                    "Identify standby loads such as set-top boxes, old fridges, and "
-                    "gaming consoles.  Smart power strips can cut phantom load by up to 10%."
-                ),
-                "impact": "medium",
-                "saving_pct": 10.0,
-            }
-        )
-
-    # 3. Abnormal spike detection
-    if anomaly_result and anomaly_result["count"] > 0:
-        suggestions.append(
-            {
-                "category": "Anomaly",
-                "title": f"Investigate {anomaly_result['count']} Abnormal Consumption Spikes",
-                "detail": (
-                    f"We detected {anomaly_result['count']} unusual readings "
-                    f"({anomaly_result['pct']:.1f}% of your data).  "
-                    "These may indicate faulty appliances, leaking HVAC, or unauthorised devices.  "
-                    "Check your circuit breaker log and compare with appliance schedules."
-                ),
-                "impact": anomaly_result["severity"],
-                "saving_pct": 5.0,
-            }
-        )
-
-    # 4. Night-time consumption
-    if timestamps is not None:
-        night_mask = (timestamps.hour >= 0) & (timestamps.hour <= 5)
-        night_mean = float(np.mean(series[night_mask])) if night_mask.any() else 0
-        if night_mean > 0.5 * mean_usage:
-            suggestions.append(
-                {
+        # 2. Night-time load (00:00-05:59)
+        night_mask = hours <= 5
+        if night_mask.any():
+            night_mean = float(series[night_mask].mean())
+            if night_mean > 0.75 * mean_usage:
+                suggestions.append({
                     "category": "Night Usage",
                     "title": "Reduce Late-Night Energy Waste",
                     "detail": (
-                        f"Night-time usage is {night_mean:.2f} kW – "
-                        "unusually high for sleeping hours.  "
-                        "Check HVAC schedules, electric water heaters, and leave only "
-                        "essential devices on standby."
+                        f"Night-time load is {night_mean:.2f} kW – {100 * night_mean / mean_usage:.0f}% "
+                        "of your average, which is high for sleeping hours. Check HVAC schedules, "
+                        "water heaters and devices left running."
                     ),
                     "impact": "medium",
                     "saving_pct": 8.0,
-                }
-            )
+                    "basis": "heuristic",
+                })
 
-    # 5. Generic tip if no patterns found
+    # 3. High overall baseline
+    if mean_usage > 1.5:
+        suggestions.append({
+            "category": "Baseline Load",
+            "title": "Reduce Standby / Always-On Appliances",
+            "detail": (
+                f"Average consumption is {mean_usage:.2f} kW. Look for standby loads (set-top boxes, "
+                "old fridges, consoles); smart power strips typically trim phantom load by up to ~10%."
+            ),
+            "impact": "medium",
+            "saving_pct": 10.0,
+            "basis": "heuristic",
+        })
+
+    # 4. Abnormal spikes
+    if anomaly_result and anomaly_result["count"] > 0:
+        suggestions.append({
+            "category": "Anomaly",
+            "title": f"Investigate {anomaly_result['count']} Abnormal Consumption Spikes",
+            "detail": (
+                f"{anomaly_result['count']} unusual readings were detected "
+                f"({anomaly_result['pct']:.1f}% of the data). They can indicate a faulty appliance "
+                "or a device left on; compare their timestamps with your appliance schedule."
+            ),
+            "impact": anomaly_result["severity"],
+            "saving_pct": 5.0,
+            "basis": "heuristic",
+        })
+
+    # 5. Nothing found
     if not suggestions:
-        suggestions.append(
-            {
-                "category": "General",
-                "title": "Your Consumption Pattern Looks Healthy",
-                "detail": (
-                    "No major inefficiencies detected.  Consider a smart thermostat or "
-                    "solar panels to further reduce your carbon footprint."
-                ),
-                "impact": "low",
-                "saving_pct": 0.0,
-            }
-        )
+        suggestions.append({
+            "category": "General",
+            "title": "Your Consumption Pattern Looks Healthy",
+            "detail": (
+                "No major inefficiencies detected. A smart thermostat or rooftop solar "
+                "could reduce consumption further."
+            ),
+            "impact": "low",
+            "saving_pct": 0.0,
+            "basis": "computed",
+        })
 
     return suggestions

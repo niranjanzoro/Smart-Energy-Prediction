@@ -79,10 +79,9 @@ def _print_metrics(name: str, m: dict) -> None:
 
 def moving_average(series: np.ndarray, window: int = 5) -> np.ndarray:
     """
-    Apply a centred moving average to smooth a 1-D array.
-
-    Edges are handled by a decreasing window (same as `np.convolve` in
-    'same' mode with a uniform kernel).
+    Centred moving average.  Near the edges the window shrinks
+    (``min_periods=1``) instead of being zero-padded, so the ends are not
+    biased towards 0.
     """
-    kernel = np.ones(window) / window
-    return np.convolve(series, kernel, mode="same")
+    import pandas as pd
+    return pd.Series(series).rolling(window, center=True, min_periods=1).mean().to_numpy()

@@ -1,165 +1,193 @@
 """
 train_models.py
 ───────────────
-Entry-point script that:
-  1. Loads and preprocesses the dataset (synthetic by default)
-  2. Trains both the LSTM and Linear Regression models
-  3. Evaluates and compares them on the test set
-  4. Saves both trained models + the fitted scaler to disk
-  5. Generates and saves comparison charts
+End-to-end training / evaluation script.
+
+  1. Load + preprocess data (synthetic by default, UCI with --real)
+  2. Fit Ridge (alpha tuned with TimeSeriesSplit) and, optionally, the LSTM
+  3. Evaluate on the held-out TEST period in kW:
+       a) one-step-ahead metrics (MAE / RMSE / R² / MAPE)
+       b) multi-step back-test (RMSE at every horizon 1…72 h)
+     against two naive baselines (Persistence, Seasonal-naive)
+  4. Save models, scaler, metrics.json, meta.json and charts
 
 Run from the project root:
-    python scripts/train_models.py [--synthetic] [--epochs 30]
+    python scripts/train_models.py                    # synthetic data
+    python scripts/train_models.py --real             # UCI dataset (auto-download)
+    python scripts/train_models.py --no-lstm          # skip TensorFlow
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 
-# Allow imports from sibling directories
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
 import joblib
 import matplotlib
-matplotlib.use("Agg")  # headless – no display required
+matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    datefmt="%H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
-SAVED_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "saved")
+ROOT = os.path.join(os.path.dirname(__file__), "..")
+SAVED_DIR = os.path.join(ROOT, "models", "saved")
+CHART_DIR = os.path.join(ROOT, "data", "charts")
 SCALER_PATH = os.path.join(SAVED_DIR, "scaler.pkl")
-CHART_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "charts")
+METRICS_PATH = os.path.join(SAVED_DIR, "metrics.json")
+META_PATH = os.path.join(SAVED_DIR, "meta.json")
+
+HORIZON = 72
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train energy prediction models")
-    p.add_argument("--synthetic", action="store_true", default=True,
-                   help="Use synthetic data (default: True)")
-    p.add_argument("--real", action="store_true",
-                   help="Use real UCI dataset (requires download)")
-    p.add_argument("--epochs", type=int, default=30)
+    src = p.add_mutually_exclusive_group()
+    src.add_argument("--synthetic", action="store_true", help="use synthetic data (default)")
+    src.add_argument("--real", action="store_true", help="use the UCI dataset (downloads if missing)")
+    p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--look-back", type=int, default=24,
-                   help="Number of past hours used as input window")
-    p.add_argument("--no-lstm", action="store_true",
-                   help="Skip LSTM training (faster, no TF required)")
+    p.add_argument("--look-back", type=int, default=24, help="input window in hours")
+    p.add_argument("--no-lstm", action="store_true", help="skip LSTM (no TensorFlow needed)")
+    p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
 
-def save_training_charts(history: dict, y_test: np.ndarray,
-                         lstm_preds: np.ndarray, lr_preds: np.ndarray) -> None:
-    """Produce and save training-loss curve + prediction comparison chart."""
+# ── Charts ───────────────────────────────────────────────────────────────────
+
+def save_charts(history, test_index, y_kw, preds_kw, backtest):
     os.makedirs(CHART_DIR, exist_ok=True)
 
-    # ── Loss curve ──────────────────────────────────────────────────────
     if history:
         fig, ax = plt.subplots(figsize=(9, 4))
-        ax.plot(history["loss"], label="Train Loss", lw=2)
-        ax.plot(history["val_loss"], label="Val Loss", lw=2, linestyle="--")
-        ax.set_title("LSTM Training / Validation Loss")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Huber Loss")
-        ax.legend()
-        ax.grid(alpha=0.3)
-        fig.tight_layout()
-        fig.savefig(os.path.join(CHART_DIR, "training_loss.png"), dpi=120)
-        plt.close(fig)
+        ax.plot(history["loss"], label="Train loss", lw=2)
+        ax.plot(history["val_loss"], label="Validation loss", lw=2, ls="--")
+        ax.set(title="LSTM training / validation loss", xlabel="Epoch", ylabel="Huber loss (scaled)")
+        ax.legend(); ax.grid(alpha=.3); fig.tight_layout()
+        fig.savefig(os.path.join(CHART_DIR, "training_loss.png"), dpi=120); plt.close(fig)
 
-    # ── Prediction comparison ────────────────────────────────────────────
-    n_plot = min(200, len(y_test))
-    x_ax = np.arange(n_plot)
-
+    n = min(168, len(y_kw))
     fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(x_ax, y_test[:n_plot], label="Actual", lw=2, color="#2563eb")
-    if lstm_preds is not None:
-        ax.plot(x_ax, lstm_preds[:n_plot], label="LSTM", lw=1.5,
-                linestyle="--", color="#16a34a")
-    ax.plot(x_ax, lr_preds[:n_plot], label="Linear Regression", lw=1.5,
-            linestyle=":", color="#dc2626")
-    ax.set_title("Prediction vs Actual (first 200 test samples)")
-    ax.set_xlabel("Time Step")
-    ax.set_ylabel("Normalised Energy Consumption")
-    ax.legend()
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(os.path.join(CHART_DIR, "prediction_comparison.png"), dpi=120)
-    plt.close(fig)
+    ax.plot(test_index[:n], y_kw[:n], label="Actual", lw=2, color="#2563eb")
+    styles = {"LSTM": ("#16a34a", "--"), "LinearRegression": ("#dc2626", ":"),
+              "SeasonalNaive": ("#9ca3af", "-.")}
+    for name, p in preds_kw.items():
+        if name in styles:
+            c, ls = styles[name]
+            ax.plot(test_index[:n], p[:n], label=name, lw=1.5, ls=ls, color=c)
+    ax.set(title="One-step-ahead prediction vs actual (first 7 test days)", ylabel="kW")
+    ax.legend(); ax.grid(alpha=.3); fig.autofmt_xdate(); fig.tight_layout()
+    fig.savefig(os.path.join(CHART_DIR, "prediction_comparison.png"), dpi=120); plt.close(fig)
 
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    for name, r in backtest["rmse"].items():
+        ax.plot(range(1, len(r) + 1), r, label=name, lw=2)
+    ax.set(title=f"Multi-step forecast error vs horizon ({backtest['n_origins']} test origins)",
+           xlabel="Forecast horizon (hours)", ylabel="RMSE (kW)")
+    ax.legend(); ax.grid(alpha=.3); fig.tight_layout()
+    fig.savefig(os.path.join(CHART_DIR, "horizon_rmse.png"), dpi=120); plt.close(fig)
     log.info("Charts saved → %s", CHART_DIR)
 
 
+# ── Main ─────────────────────────────────────────────────────────────────────
+
 def main():
     args = parse_args()
+    np.random.seed(args.seed)
     use_synthetic = not args.real
 
-    # ── Data ──────────────────────────────────────────────────────────────
-    log.info("Preparing data (synthetic=%s, look_back=%d) …", use_synthetic, args.look_back)
-    from models.data_loader import get_processed_data
-    data = get_processed_data(
-        look_back=args.look_back,
-        use_synthetic=use_synthetic,
-    )
-
-    X_tr_seq = data["X_train_seq"]
-    y_tr_seq = data["y_train_seq"]
-    X_te_seq = data["X_test_seq"]
-    y_te_seq = data["y_test_seq"]
-    X_tr_flat = data["X_train_flat"]
-    X_te_flat = data["X_test_flat"]
-    scaler = data["scaler"]
-
-    # Validation split from training data (last 15%)
-    val_split = int(len(X_tr_seq) * 0.85)
-    X_val_seq, y_val_seq = X_tr_seq[val_split:], y_tr_seq[val_split:]
-    X_tr_seq_t, y_tr_seq_t = X_tr_seq[:val_split], y_tr_seq[:val_split]
-
+    from models import data_loader as dl
     from models.metrics import evaluate_predictions, compare_models
+    from models.forecaster import make_predict_fn, backtest_horizons
 
-    results = {}
-    lstm_preds = None
-    history = {}
+    if args.real:
+        dl.download_dataset()
 
-    # ── LSTM ──────────────────────────────────────────────────────────────
+    log.info("Preparing data (source=%s, look_back=%d) …",
+             "synthetic" if use_synthetic else "UCI", args.look_back)
+    data = dl.get_processed_data(look_back=args.look_back, use_synthetic=use_synthetic)
+    scaler = data["scaler"]
+    inv = lambda a: dl.inverse_target(a, scaler)
+
+    X_tr, y_tr = data["X_train_seq"], data["y_train_seq"]
+    X_te, y_kw = data["X_test_seq"], data["y_test_kw"]
+
+    # Validation = chronologically last 15 % of the TRAIN windows (test set untouched)
+    v = int(len(X_tr) * 0.85)
+    X_fit, y_fit, X_val, y_val = X_tr[:v], y_tr[:v], X_tr[v:], y_tr[v:]
+
+    results, preds_kw, predict_fns, history = {}, {}, {}, {}
+
+    # ── Ridge ────────────────────────────────────────────────────────────
+    from models.linear_model import train_linear, predict_linear, save_linear
+    lr = train_linear(data["X_train_flat"], y_tr)
+    preds_kw["LinearRegression"] = inv(predict_linear(lr, data["X_test_flat"]))
+    save_linear(lr)
+    predict_fns["LinearRegression"] = make_predict_fn("linear", lr)
+    best_alpha = float(lr.named_steps["ridge"].alpha)
+
+    # ── LSTM ─────────────────────────────────────────────────────────────
     if not args.no_lstm:
         try:
             from models.lstm_model import train_lstm, predict_lstm, save_lstm
-            model_lstm, history = train_lstm(
-                X_tr_seq_t, y_tr_seq_t,
-                X_val_seq, y_val_seq,
-                epochs=args.epochs,
-                batch_size=args.batch_size,
-            )
-            lstm_preds = predict_lstm(model_lstm, X_te_seq)
-            results["LSTM"] = evaluate_predictions(y_te_seq, lstm_preds, "LSTM")
-            save_lstm(model_lstm)
-        except Exception as e:
-            log.warning("LSTM training failed (%s) – skipping.", e)
-    else:
-        log.info("LSTM training skipped (--no-lstm flag).")
+            lstm, history = train_lstm(X_fit, y_fit, X_val, y_val, epochs=args.epochs,
+                                       batch_size=args.batch_size, seed=args.seed)
+            preds_kw["LSTM"] = inv(predict_lstm(lstm, X_te))
+            save_lstm(lstm)
+            predict_fns["LSTM"] = make_predict_fn("lstm", lstm)
+        except Exception as e:                                   # noqa: BLE001
+            log.warning("LSTM training failed (%s) – continuing without it.", e)
 
-    # ── Linear Regression ────────────────────────────────────────────────
-    from models.linear_model import train_linear, predict_linear, save_linear
-    model_lr = train_linear(X_tr_flat, y_tr_seq)
-    lr_preds = predict_linear(model_lr, X_te_flat)
-    results["LinearRegression"] = evaluate_predictions(y_te_seq, lr_preds, "LinearRegression")
-    save_linear(model_lr)
+    # ── Baselines (one-step) ─────────────────────────────────────────────
+    # window row 0 = t-24, row -1 = t-1  (scaled target in column 0)
+    preds_kw["Persistence"] = inv(X_te[:, -1, 0])
+    preds_kw["SeasonalNaive"] = inv(X_te[:, 0, 0]) if args.look_back == 24 else inv(X_te[:, -1, 0])
 
-    # Save scaler
+    # ── One-step metrics (kW, held-out test period) ──────────────────────
+    for name in ["LSTM", "LinearRegression", "Persistence", "SeasonalNaive"]:
+        if name in preds_kw:
+            results[name] = evaluate_predictions(y_kw, preds_kw[name], name)
+    compare_models(results)
+
+    # ── Multi-step back-test ─────────────────────────────────────────────
+    log.info("Running %d-hour multi-step back-test …", HORIZON)
+    bt = backtest_horizons(data["y_hourly"], data["split_ts"], predict_fns, scaler,
+                           look_back=args.look_back, horizon=HORIZON)
+    for name in bt["rmse"]:
+        r = bt["rmse"][name]
+        log.info("  %-17s RMSE @1h=%.3f  @24h=%.3f  @72h=%.3f kW", name, r[0], r[23], r[-1])
+
+    # ── Persist everything the API needs ─────────────────────────────────
     os.makedirs(SAVED_DIR, exist_ok=True)
     joblib.dump(scaler, SCALER_PATH)
-    log.info("Scaler saved → %s", SCALER_PATH)
+    with open(METRICS_PATH, "w") as fh:
+        json.dump(results, fh, indent=2)
+    meta = {
+        "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "data_source": data["source"],
+        "look_back": args.look_back,
+        "feature_cols": data["feature_cols"],
+        "n_train": int(len(X_tr)), "n_test": int(len(X_te)),
+        "split_ts": str(data["split_ts"]),
+        "ridge_alpha": best_alpha,
+        "horizon": HORIZON,
+        "horizon_rmse": bt["rmse"], "horizon_mae": bt["mae"],
+        "backtest_origins": bt["n_origins"],
+        "lstm_epochs_run": len(history.get("loss", [])),
+        "seed": args.seed,
+        "metrics_note": "One-step-ahead, held-out test period, kW.",
+    }
+    with open(META_PATH, "w") as fh:
+        json.dump(meta, fh, indent=2)
 
-    # ── Comparison ───────────────────────────────────────────────────────
-    compare_models(results)
-    save_training_charts(history, y_te_seq, lstm_preds, lr_preds)
-    log.info("✓ All done.  Models and charts saved.")
+    save_charts(history, data["test_index"], y_kw, preds_kw, bt)
+    log.info("✓ Done. Models, metrics.json, meta.json and charts saved.")
 
 
 if __name__ == "__main__":

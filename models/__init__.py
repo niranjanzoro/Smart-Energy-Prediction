@@ -1,17 +1,18 @@
 """
 models/
 ───────
-AI/ML module for the Smart Energy Consumption Predictor.
+ML package for the Smart Energy Consumption Predictor.
 
-Exports
-───────
-train_all        – train both LSTM and Linear models in one call
-predict_future   – generate N-step ahead forecasts
-compare_models   – print performance comparison table
-detect_anomalies – flag unusual consumption readings
-generate_suggestions – return optimisation tips
+data_loader      – load / clean / feature-engineer / split / scale
+linear_model     – Ridge regression (time-series-CV tuned)
+lstm_model       – stacked LSTM (TensorFlow/Keras, imported lazily)
+forecaster       – recursive multi-step forecasting + horizon back-test
+anomaly_detector – statistical / Isolation-Forest anomaly detection + tips
+metrics          – MAE, RMSE, R², MAPE and a comparison table
+
+TensorFlow is NOT imported here, so the API can start without it.
 """
 
-from .data_loader import get_processed_data          # noqa: F401
-from .metrics import evaluate_predictions, compare_models, moving_average  # noqa: F401
-from .anomaly_detector import detect_anomalies, generate_suggestions  # noqa: F401
+from .data_loader import get_processed_data                                   # noqa: F401
+from .metrics import evaluate_predictions, compare_models, moving_average     # noqa: F401
+from .anomaly_detector import detect_anomalies, generate_suggestions          # noqa: F401

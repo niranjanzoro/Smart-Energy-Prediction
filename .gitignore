@@ -8,10 +8,7 @@ venv/
 env/
 .venv/
 
-# Model artifacts (large files)
-models/saved/*.keras
-models/saved/*.pkl
-models/saved/*.h5
+# NOTE: models/saved/* is committed on purpose (small, needed by the API / deployment)
 
 # Data
 data/household_power_consumption.txt

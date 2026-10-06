@@ -5,7 +5,7 @@ services:
   - type: web
     name: smart-energy-api
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements-deploy.txt
     startCommand: gunicorn backend.app:app --workers 2 --bind 0.0.0.0:$PORT --timeout 120
     envVars:
       - key: FLASK_DEBUG

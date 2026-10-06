@@ -38,7 +38,7 @@
     <div class="hero-copy">
       <p class="hero-eyebrow">AI-Powered Forecasting</p>
       <h1 class="hero-title">Predict.<br/>Optimise.<br/>Save.</h1>
-      <p class="hero-sub">LSTM &amp; Linear Regression models analyse your household power data to forecast consumption and surface actionable savings.</p>
+      <p class="hero-sub">LSTM &amp; Ridge Regression models analyse your household power data to forecast consumption and surface actionable savings.</p>
       <div class="hero-cta">
         <button class="btn btn-primary" onclick="scrollTo('predict')">Run Prediction</button>
         <button class="btn btn-ghost" onclick="loadHistory()">Load History</button>
@@ -127,6 +127,7 @@
         <canvas id="predictChart" height="120"></canvas>
         <div class="chart-loading" id="predictLoader">Awaiting input…</div>
       </div>
+      <p id="forecastNote" class="form-hint" style="font-size:11px;color:var(--text-dim);margin:8px 0 0"></p>
       <div class="stat-row" id="forecastStats" style="display:none">
         <div class="stat"><span class="stat-val" id="fMean">—</span><span class="stat-lbl">Avg kW</span></div>
         <div class="stat"><span class="stat-val" id="fPeak">—</span><span class="stat-lbl">Peak kW</span></div>
@@ -139,7 +140,7 @@
 <!-- ── Real-time Simulation ──────────────────────────────────────────── -->
 <section class="section">
   <div class="section-header">
-    <h2 class="section-title">Real-Time Simulation</h2>
+    <h2 class="section-title">Real-Time Simulation <small style="font-size:11px;color:var(--text-dim)">(replay of held-out test data: prediction vs actual)</small></h2>
     <div class="sim-controls">
       <button class="btn btn-sm btn-primary" id="simStartBtn" onclick="toggleSimulation()">▶ Start</button>
       <span class="sim-status" id="simStatus">Stopped</span>
@@ -211,7 +212,7 @@
 
 <!-- ── Footer ────────────────────────────────────────────────────────── -->
 <footer class="footer">
-  <p>EnergyIQ — Smart Energy Consumption Predictor &nbsp;|&nbsp; LSTM + Linear Regression &nbsp;|&nbsp; UCI Dataset</p>
+  <p>EnergyIQ — Smart Energy Consumption Predictor &nbsp;|&nbsp; LSTM + Ridge Regression &nbsp;|&nbsp; UCI Household Power / synthetic demo data</p>
   <p class="footer-sub">Academic project · Flask · TensorFlow · Chart.js</p>
 </footer>
 

@@ -100,6 +100,7 @@ def train_lstm(
     epochs: int = 50,
     batch_size: int = 64,
     patience: int = 8,
+    seed: int | None = 42,
 ) -> tuple:
     """
     Train the LSTM model with early-stopping and LR reduction on plateau.
@@ -120,6 +121,8 @@ def train_lstm(
         raise RuntimeError("TensorFlow is not installed.")
 
     look_back, n_features = X_train.shape[1], X_train.shape[2]
+    if seed is not None:
+        tf.keras.utils.set_random_seed(seed)        # numpy + python + TF seeds
     model = build_lstm(look_back, n_features)
 
     os.makedirs(MODELS_DIR, exist_ok=True)
@@ -199,7 +202,7 @@ def load_lstm():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     # Quick smoke test with random data
-    look_back, n_features, n_samples = 24, 12, 500
+    look_back, n_features, n_samples = 24, 10, 500
     X_dummy = np.random.rand(n_samples, look_back, n_features).astype("float32")
     y_dummy = np.random.rand(n_samples).astype("float32")
 

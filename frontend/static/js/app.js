@@ -26,6 +26,9 @@ const state = {
   simData: [],
   simLabels: [],
   historySeries: [],
+  simStep: 0,
+  simActual: [],
+  lastError: '',
 };
 
 // ── Chart Instances ────────────────────────────────────────────────────────
@@ -38,8 +41,12 @@ async function apiFetch(path, opts = {}) {
       headers: { 'Content-Type': 'application/json' },
       ...opts,
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      state.lastError = body.error || `HTTP ${res.status}`;
+      throw new Error(state.lastError);
+    }
+    return body;
   } catch (e) {
     console.error(`API error [${path}]:`, e);
     return null;
@@ -87,7 +94,7 @@ async function loadHistory(days = 7) {
   const step = Math.max(1, Math.floor(data.values.length / 200));
   const vals = data.values.filter((_, i) => i % step === 0);
   const lbls = data.timestamps.filter((_, i) => i % step === 0)
-    .map(t => t.slice(11, 16)); // HH:MM
+    .map(t => `${t.slice(5, 10)} ${t.slice(11, 16)}`); // MM-DD HH:MM
 
   loader.classList.add('hidden');
   destroyChart('history');
@@ -179,7 +186,7 @@ async function runPrediction() {
   btn.disabled = false;
 
   if (!data) {
-    loader.textContent = 'Prediction failed – check API connection.';
+    loader.textContent = `Prediction failed – ${state.lastError || 'check API connection'}`;
     return;
   }
 
@@ -188,7 +195,7 @@ async function runPrediction() {
   // Render chart
   destroyChart('predict');
   const ctx = document.getElementById('predictChart').getContext('2d');
-  const labels = data.timestamps.map(t => t.slice(11, 16));
+  const labels = data.timestamps.map(t => (nSteps > 24 ? t.slice(5, 10) + ' ' : '') + t.slice(11, 16));
 
   const datasets = [
     {
@@ -253,12 +260,19 @@ async function runPrediction() {
   document.getElementById('fMin').textContent  = `${min} kW`;
   statsRow.style.display = 'grid';
 
+  // Tell the user which model really ran (and any fallback / interval info)
+  const noteEl = document.getElementById('forecastNote');
+  if (noteEl) {
+    noteEl.textContent = `Model: ${data.model_used}` + (data.note ? ` – ${data.note}` : '') +
+      ` · forecast starts after ${data.history_ends} · shaded band = ${data.interval}`;
+  }
+
   // Load suggestions too
-  loadSuggestions(pred);
+  loadSuggestions(pred, data.timestamps);
 }
 
 // ── Suggestions ─────────────────────────────────────────────────────────────
-async function loadSuggestions(series = null) {
+async function loadSuggestions(series = null, timestamps = null) {
   const grid = document.getElementById('suggestionsGrid');
   grid.innerHTML = `
     <div class="suggestion-skeleton"></div>
@@ -266,7 +280,7 @@ async function loadSuggestions(series = null) {
     <div class="suggestion-skeleton"></div>
   `;
 
-  const payload = series ? { series } : {};
+  const payload = series ? { series, timestamps } : {};
   const data = await apiFetch('/api/suggestions', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -285,7 +299,7 @@ async function loadSuggestions(series = null) {
       <div class="suggestion-detail">${s.detail}</div>
       <div class="suggestion-footer">
         <span class="impact-pill ${s.impact}">${s.impact} impact</span>
-        ${s.saving_pct > 0 ? `<span class="saving-text">Save up to ${s.saving_pct}%</span>` : ''}
+        ${s.saving_pct > 0 ? `<span class="saving-text">${s.basis === 'heuristic' ? 'Est. ~' : 'Up to '}${s.saving_pct}%</span>` : ''}
       </div>
     </div>
   `).join('');
@@ -382,7 +396,10 @@ async function runAnomalyDetection() {
 async function loadModelMetrics() {
   const grid = document.getElementById('metricsGrid');
   const data = await apiFetch('/api/model-metrics');
-  if (!data) return;
+  if (!data) {
+    grid.innerHTML = `<p style="color:var(--text-dim)">${state.lastError || 'Metrics unavailable.'}</p>`;
+    return;
+  }
 
   grid.innerHTML = Object.entries(data).map(([name, m]) => `
     <div class="metric-card">
@@ -403,7 +420,7 @@ function renderMetricsBarChart(data) {
   destroyChart('metrics');
   const ctx = document.getElementById('metricsChart').getContext('2d');
   const models = Object.keys(data);
-  const colors = ['#00e5a0', '#4da8ff', '#ffb347'];
+  const colors = ['#00e5a0', '#4da8ff', '#ffb347', '#ff4d6d', '#a78bfa'];
 
   const metricKeys = ['mae', 'rmse'];
 
@@ -446,6 +463,7 @@ function renderMetricsBarChart(data) {
 function initSimChart() {
   const ctx = document.getElementById('simChart').getContext('2d');
   state.simData   = Array(60).fill(null);
+  state.simActual = Array(60).fill(null);
   state.simLabels = Array(60).fill('');
 
   charts.sim = new Chart(ctx, {
@@ -453,7 +471,7 @@ function initSimChart() {
     data: {
       labels: state.simLabels,
       datasets: [{
-        label: 'Live kW',
+        label: 'Predicted kW',
         data: state.simData,
         borderColor: '#ffb347',
         borderWidth: 2,
@@ -468,13 +486,23 @@ function initSimChart() {
         pointRadius: 0,
         pointHoverRadius: 4,
         spanGaps: true,
+      }, {
+        label: 'Actual kW',
+        data: state.simActual,
+        borderColor: '#4da8ff',
+        borderWidth: 1.5,
+        borderDash: [4, 3],
+        fill: false,
+        tension: 0.4,
+        pointRadius: 0,
+        spanGaps: true,
       }],
     },
     options: {
       animation: false,
       responsive: true,
       plugins: {
-        legend: { display: false },
+        legend: { display: true, labels: { color: '#7a8499', boxWidth: 14 } },
         tooltip: {
           backgroundColor: '#11141a',
           borderColor: '#1f2430',
@@ -491,19 +519,21 @@ function initSimChart() {
 }
 
 async function simTick() {
-  const lastVals = state.simData.filter(v => v !== null).slice(-6);
   const data = await apiFetch('/api/simulate', {
     method: 'POST',
-    body: JSON.stringify({ last_values: lastVals }),
+    body: JSON.stringify({ step: state.simStep++, model: state.selectedModel }),
   });
   if (!data) return;
 
   state.simData.shift();
   state.simData.push(data.next_value);
+  state.simActual.shift();
+  state.simActual.push(data.actual);
   state.simLabels.shift();
-  state.simLabels.push(data.timestamp.slice(11, 19));
+  state.simLabels.push(data.timestamp.slice(5, 10) + ' ' + data.timestamp.slice(11, 16));
 
   charts.sim.data.datasets[0].data  = state.simData;
+  charts.sim.data.datasets[1].data  = state.simActual;
   charts.sim.data.labels            = state.simLabels;
   charts.sim.update('none');
 }
